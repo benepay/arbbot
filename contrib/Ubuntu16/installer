@@ -3,7 +3,6 @@
 setup_ntp() {
     echo "Setting up NTP"
     service ntp stop
-    ntpdate ntp.ubuntu.com
     service ntp start || return 1
     update-rc.d ntp enable
     sleep 5
@@ -19,77 +18,113 @@ main () {
         return 1
     fi
     apt update
-    apt-get -y install php-cli php-curl php-mysqlnd mysql-server nginx-full php-fpm unzip apache2-utils ntp || return 1
+    apt-get -y install php-cli php-curl php-mysqlnd mysql-server nginx-full php-fpm unzip apache2-utils bc || return 1
 
     ARBDIR="/var/www/arbbot"
     cd /var/www || { echo "Unable to cd to /var/www"; return 1; }
     git clone --recursive https://github.com/cryptoeax/arbbot.git
     [[ ! -d "${ARBDIR}" ]] && read -p "Where is arbbot installed? (enter to accept default) " -i "/var/www/arbbot" -e ARBDIR
     [[ ! -f ${ARBDIR}/database.sql ]] && { echo "Unable to locate ${ARBDIR}/database.sql, bailing out!"; return 0; }
-    cd ${ARBDIR} || { echo "Unable to cd to ${ARBDIR}"; return 1; }
+    cd "${ARBDIR}" || { echo "Unable to cd to ${ARBDIR}"; return 1; }
 
     echo "Creating the Database"
     read -p "Please supply ROOT's MySQL password: " -e ROOTPASS
     read -p "Next, provide a new password for creating the arbitrage DB user: " -e ARBPASS
 
-    mysql -u root -p${ROOTPASS} <<EOF
+    mysql -u root -p"${ROOTPASS}" <<EOF
     CREATE DATABASE arbitrage;
     GRANT ALL ON arbitrage.* TO arbitrage@localhost IDENTIFIED BY '${ARBPASS}';
     use arbitrage;
     source ${ARBDIR}/database.sql;
 EOF
 if [ -f "${ARBDIR}/web/config.inc.php" ]; then
-    echo "Backing up existing ${ARBDIR}/web/config.inc.php to ${ARBDIR}/web/config.inc.php.bak"
-    cp ${ARBDIR}/web/config.inc.php ${ARBDIR}/web/config.inc.php.bak
+    echo "Backing up existing ${ARBDIR}/web/config.inc.php to ${ARBDIR}/web/config.inc.php.$(date +%s)"
+    cp "${ARBDIR}/web/config.inc.php" "${ARBDIR}/web/config.inc.php.$(date +%s)"
 fi
-    cat << EOF > ${ARBDIR}/web/config.inc.php
-    <?php
-    $dbHost = "localhost";
-    $dbName = "arbitrage";
-    $dbUser = "arbitrage";
-    $dbPass = "${ARBPASS}";
+cat << EOF > "${ARBDIR}/web/config.inc.php"
+<?php
+\$dbHost = "localhost";
+\$dbName = "arbitrage";
+\$dbUser = "arbitrage";
+\$dbPass = "${ARBPASS}";
 EOF
 
 if [ ! -f "${ARBDIR}/config.ini" ]; then
     echo "Creating BOT config file at ${ARBDIR}/config.ini"
-    cp ${ARBDIR}/config.ini.example ${ARBDIR}/config.ini
+    cp "${ARBDIR}/config.ini.example" "${ARBDIR}/config.ini"
 fi
+perl -i -pe "s/pass = YOUR_PASSWORD/pass = ${ARBPASS}/" "${ARBDIR}/config.ini"
 setup_ntp
 setup_sysd
 setup_web
+setup_pip
+}
+
+config_arbbot () {
+    echo "Arbbot Initial Configuration"
+    echo "Important note:"
+    echo "In order to realize profit, it is highly recommended that a minimum of 0.4 BTC be used for this bot."
+    echo "For example, with 0.4 BTC, you can assign 0.2 BTC to the 'autobuy_funds' while still keeping at least 0.1 - 0.2 BTC at the exchange so that the bot has enough 'buffer' for trades."
+    echo "The higher the amount, the more coins can be bought, and the more arbitrage-opportunities can be taken."
+
+    read -p "Please enter the TOTAL amount of BTC you plan to use: " -e BTC
+    if [[ $(echo "$BTC>=0.4" | bc -l) -gt 0 ]]; then
+        read -p "Please enter the amount of 'buffer' BTC to keep at the exchanges for trades: " -e EXCH_BUFFER
+        AUTOBUY=$(echo "$BTC-$EXCH_BUFFER" | bc -l)
+        if [[ $(echo "$BTC<=$AUTOBUY" | bc -l) -gt 0 ]]; then
+            echo "ERROR: You must set an exchange buffer < the total amount of BTC you have!"
+            return 1
+        fi
+        read -n 1 -p "Setting Autobuy to ${AUTOBUY} BTC, ok to proceed? (y/n)? " yesno
+        if [[ "${yesno}" == "y" ]]; then
+            mysql -u root -p"${ROOTPASS}" arbitrage -e "UPDATE stats SET value = '0.2' WHERE keyy = 'autobuy_funds'" > /dev/null 2>&1
+            echo
+            grep -q 'profit-limit = 1.0' config.ini && perl -i -pe "s/profit-limit = 1\.0/profit-limit = ${BTC}/" config.ini
+        else
+            echo "Skipped setting Autobuy, please set manually using:"
+            echo "mysql -u root -p${ROOTPASS} arbitrage -e \"UPDATE stats SET value = '0.n' WHERE keyy = 'autobuy_funds'\""
+            echo "!!! Change '0.n' to your desired amount, such as '0.2'"
+        fi
+    else
+        echo "$BTC BTC is not enough to really take advantage of arbitrage opportunities"
+        echo "While not recommended, it is still possible to get small profits,"
+        echo "but you should thoroughly read through the github README as well as your config.ini"
+        echo "to work out the most appropriate parameters in the config.ini for your needs"
+        echo "Completing setup, but manual config.ini editing is still needed!"
+    fi
 }
 
 setup_sysd () {
     cat << EOF > /etc/systemd/system/arbbot.service
-    [Unit]
-    Description=Arbbot - Arbitrage Trading Bot
-    After=syslog.target network.target mysql.service
+[Unit]
+Description=Arbbot - Arbitrage Trading Bot
+After=syslog.target network.target mysql.service
 
-    [Service]
-    ExecStart=/usr/bin/php main.php
-    WorkingDirectory=${ARBDIR}
-    Type=simple
-    InaccessibleDirectories=/home /root /boot /opt /mnt /media
-    StandardOutput=syslog
-    StandardError=syslog
-    SyslogIdentifier=arbbot
-    ProtectHome=true
-    PrivateTmp=true
-    PrivateDevices=true
-    NoNewPrivileges=true
-    Restart=always
+[Service]
+ExecStart=/usr/bin/php main.php
+WorkingDirectory=${ARBDIR}
+Type=simple
+InaccessibleDirectories=/home /root /boot /opt /mnt /media
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=arbbot
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+Restart=always
 
-    [Install]
-    WantedBy=multi-user.target
+[Install]
+WantedBy=multi-user.target
 EOF
 
 systemctl enable arbbot || return 1
 }
 
 setup_web () {
-    mkdir -p ${ARBDIR}/conf
+    mkdir -p "${ARBDIR}/conf"
     read -p "Please supply a username for the Web UI Login: " -e UI_USER
-    htpasswd -c ${ARBDIR}/conf/arbitrage.passwd ${UI_USER}
+    htpasswd -c "${ARBDIR}/conf/arbitrage.passwd" "${UI_USER}"
     rm /etc/nginx/sites-enabled/default
     cat << EOF > /etc/nginx/sites-enabled/default
 server {
@@ -113,21 +148,22 @@ EOF
 service nginx restart
 }
 
+setup_pip () {
+    # python-pip is not essential, just used for the command line markdown viewer called 'mdv'
+    echo "Setting up Python PIP"
+    apt install -y python-pip
+    pip install --upgrade pip
+    pip install mdv
+}
+
+
 main || echo "Something went wrong, please try the guide instead at https://github.com/cryptoeax/arbbot"
+config_arbbot || exit 1
 
-cat <<-EOF
-TWO Options exits to actually allow the bot to buy coins automatically.
-First, you need to reserve some autobuy funds.
-You can do that either by running the following commands against the database manually:
-
-    mysql -u root -p${ROOTPASS} arbitrage -e UPDATE stats SET value = "0.2" WHERE keyy = "autobuy_funds"
-
-This example assigns 0.2 BTC to the "autobuy_funds". The higher the amount, the more coins can be bought and the more arbitrage-opportunities can be taken. Be careful to keep at least 0.1 - 0.2 BTC at the exchange to give the bot enough room to trade.
-
-
-OR by enabling the general.admin-ui setting, the web UI shows you the Admin interface which allows you to change the autobuy funds amount.
-However, we recommend against enabling the admin UI if your UI isn't secure using password authentication, HTTPS, and exposed to the Internet.
-EOF
+echo
+read -n 1 -p "Installation complete, would you like to see the README? (y/n)? " yesno
+[[ "${yesno}" == "y" ]] && mdv README.md
+echo
 
 ipAddr=$(curl -s -4 icanhazip.com)
 if [[ "${ipAddr}" ]]; then
@@ -135,3 +171,5 @@ if [[ "${ipAddr}" ]]; then
 else
     echo "You should now be able to log in to the Web UI using the username ${UI_USER}"
 fi
+
+echo "Don't forget, you MUST still set up your exchange API keys, https, and any custom settings you want in the config.ini!"
