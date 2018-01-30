@@ -77,7 +77,7 @@ config_arbbot () {
         fi
         read -n 1 -p "Setting Autobuy to ${AUTOBUY} BTC, ok to proceed? (y/n)? " yesno
         if [[ "${yesno}" == "y" ]]; then
-            mysql -u root -p"${ROOTPASS}" arbitrage -e "UPDATE stats SET value = '0.2' WHERE keyy = 'autobuy_funds'" > /dev/null 2>&1
+            mysql -u root -p"${ROOTPASS}" arbitrage -e "UPDATE stats SET value = '${AUTOBUY}' WHERE keyy = 'autobuy_funds'" > /dev/null 2>&1
             echo
             grep -q 'profit-limit = 1.0' config.ini && perl -i -pe "s/profit-limit = 1\.0/profit-limit = ${BTC}/" config.ini
         else
