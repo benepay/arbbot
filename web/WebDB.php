@@ -128,7 +128,6 @@ class WebDB {
     $walletsMap = [ ];
     $ids = [ ];
     if ( $mode == 0 ) {
-/*
       // Append an entry for the current balances
       $ids = array_reduce( array_reverse( $data, true ), function( $carry, $value ) {
         if ( in_array( '0', $carry ) ) {
@@ -171,7 +170,6 @@ class WebDB {
         $data[] = ['time' => strval( time() ), 'value' => formatBTC( $sma ),
                    'raw' => formatBTC( $balance ), 'exchange' => $id ];
       }
-*/
     }
 
     mysql_close( $link );
@@ -196,12 +194,22 @@ class WebDB {
     $extc = [ ];
     $exoc = [ ];
 
+    $exchangeMap = [ ];
+    $walletMap = [ ];
+
     $wallets = [ ];
     while ( $row = mysql_fetch_assoc( $result ) ) {
 
       $coin = $row[ 'coin' ];
       $exid = $row[ 'ID_exchange' ];
-      $balance = $row[ 'balance' ];
+      if ( !isset( $exchangeMap[ $exid ] ) ) {
+        $exchangeMap[ $exid ] = Exchange::createFromID( $exid );
+        $exchangeMap[ $exid ]->refreshWallets();
+        $walletMap[ $exid ] = $exchangeMap[ $exid ]->getWalletsConsideringPendingDeposits();
+      }
+
+      // Will be 0 if $coin doesn't exist in our wallets!
+      $balance = @floatval( @$walletMap[ $exid ][ $coin ] );
 
       if ( key_exists( $exid, $extc ) === false ) {
         $extc[ $exid ] = intval( self::getTradeCount( $exid ) );
@@ -209,7 +217,7 @@ class WebDB {
       }
 
       $age = time() - $row[ 'created' ];
-      $wallets[ $coin ][ $exid ][ 'balance' ] = floatval( $balance );
+      $wallets[ $coin ][ $exid ][ 'balance' ] = $balance;
       $wallets[ $coin ][ $exid ][ 'balance_diff' ] = floatval( formatBTC( $row[ 'desired_balance' ] - $balance ) );
       $wallets[ $coin ][ $exid ][ 'opportunities' ] = intval( $row[ 'uses' ] );
       $wallets[ $coin ][ $exid ][ 'change' ] = floatval( $balance  - self::getHistoricBalance( $coin, $exid ) );
