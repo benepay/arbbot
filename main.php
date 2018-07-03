@@ -59,29 +59,17 @@ if ( !Database::balancesTableExists() ) {
   Database::importBalances();
 }
 
-Database::createBalancesIndexIfNeeded();
-
-if ( !Database::currentSimulatedProfitsRateViewExists() ) {
+//if ( !Database::currentSimulatedProfitsRateViewExists() ) {
   Database::createCurrentSimulatedProfitsRateView();
-}
+//}
 
 if ( !Database::pendingDepositsTableExists() ) {
   Database::createPendingDepositsTable();
-}
-
-if ( !Database::pendingDepositsTableExists() ) {
-  Database::createPendingDepositsTable();
-} else {
-  Database::ensurePendingDepositsUpgraded();
 }
 
 if ( !Database::profitsTableExists() ) {
   Database::createProfitsTable();
   Database::importProfits();
-}
-
-if ( !Database::walletsTableExists() ) {
-  Database::createWalletsTable();
 }
 
 if ( !Database::profitLossTableExists() ) {
