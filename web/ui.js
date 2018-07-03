@@ -167,14 +167,17 @@ $(function() {
             return ""; // Not a coin. Has no icon.
         }
         symbol = symbol.trim();
+        var title = symbol;
         // Canonicalize symbol
         if (symbol == "SC") {
           symbol = "SIA";
         } else if (symbol == "BLK") {
           symbol = "BC";
+        } else if (symbol == "XLM") {
+          symbol = "STR";
         }
  
-        return "<i class=\"cc " + symbol + "\" title=\"" + symbol + "\"/> ";
+        return "<i class=\"cc " + symbol + "\" title=\"" + title + "\"/> ";
     }
 
     function updateGraph() {
@@ -818,7 +821,7 @@ $(function() {
 
                 htmlData += "--------- " + getIcon("BTC") + "<span title=\"Currency\">BTC</span> ----------\n";
 
-                var btcData = wallets['BTC'];
+                var btcData = ('BTC' in wallets) ? wallets['BTC'] : {};
                 var total = 0;
                 var totalChange = 0;
 

@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS `balances` (
   `ID_exchange` int(11) NOT NULL,
   PRIMARY KEY (`ID`),
   KEY `coin` (`coin`),
-  KEY `ID_exchange` (`ID_exchange`)
+  KEY `ID_exchange` (`ID_exchange`),
+  INDEX `coin_ID_exchange` (`coin`, `ID_exchange`)
 ) ENGINE=InnoDB  DEFAULT CHARSET=utf8 AUTO_INCREMENT=1 ;
 
 -- --------------------------------------------------------
@@ -202,6 +203,20 @@ CREATE TABLE IF NOT EXISTS `trade` (
   `ID_exchange_target` int(11) NOT NULL,
   PRIMARY KEY (`ID`)
 ) ENGINE=InnoDB  DEFAULT CHARSET=utf8 AUTO_INCREMENT=1 ;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `wallets`
+--
+
+CREATE TABLE IF NOT EXISTS `wallets` (
+  `ID_exchange` int(11) NOT NULL,
+  `coin` char(10) NOT NULL,
+  `created` int(11) NOT NULL,
+  `amount` varchar(18) NOT NULL,
+  PRIMARY KEY (`ID_exchange`, `coin`)
+) ENGINE=InnoDB  DEFAULT CHARSET=utf8 ;
 
 -- --------------------------------------------------------
 

@@ -552,7 +552,8 @@ class CoinManager {
     if ( $highestExchange->withdraw( 'BTC', $remainingProfit, $profitAddress ) ) {
       $txFee = $this->getSafeTxFee( $highestExchange, 'BTC', $averageBTC );
       Database::recordProfit( $remainingProfit - $txFee, 'BTC', $profitAddress, time() );
-      Database::saveWithdrawal( 'BTC', $remainingProfit, $profitAddress, $highestExchange->getID(), 0 );
+      Database::saveWithdrawal( 'BTC', $remainingProfit, $profitAddress, $highestExchange->getID(), 0,
+                                $highestExchange->getTransferFee( 'BTC', $remainingProfit ) );
 
       // -------------------------------------------------------------------------
       $restockFunds = $this->stats[ self::STAT_AUTOBUY_FUNDS ];
@@ -668,6 +669,14 @@ class CoinManager {
           logg( "Order executed!" );
           Database::saveManagement( $coin, $buyAmount, $rate, $exchange->getID() );
           $this->stats[ self::STAT_AUTOBUY_FUNDS ] = formatBTC( $autobuyFunds - $buyPrice );
+
+          // Make sure the wallets are updated for pending deposit calculations.
+          $tradesMade = array(
+            $exchange->getID() => array(
+              $coin => $buyAmount,
+            )
+          );
+          $exchange->refreshWallets( $tradesMade );
 
           $arbitrator->getTradeMatcher()->handlePostTradeTasks( $arbitrator, $exchange, $coin, 'BTC', 'buy',
                                                                 $orderID, $buyAmount );
@@ -821,6 +830,14 @@ class CoinManager {
           logg( "Order executed!" );
           Database::saveManagement( $coin, $sellAmount * -1, $rate, $exchange->getID() );
 
+          // Make sure the wallets are updated for pending deposit calculations.
+          $tradesMade = array(
+            $exchange->getID() => array(
+              $coin => -$sellAmount,
+            )
+          );
+          $exchange->refreshWallets( $tradesMade );
+
           $arbitrator->getTradeMatcher()->handlePostTradeTasks( $arbitrator, $exchange, $coin, 'BTC', 'sell',
                                                                 $orderID, $sellAmount );
         }
@@ -869,7 +886,8 @@ class CoinManager {
 
     logg( "Deposit address: $address" );
     if ( $this->doWithdraw( $source, $coin, $amount, trim( $address ) ) ) {
-      Database::saveWithdrawal( $coin, $amount, trim( $address ), $source->getID(), $target->getID() );
+      Database::saveWithdrawal( $coin, $amount, trim( $address ), $source->getID(), $target->getID(),
+                                $source->getTransferFee( $coin, $amount ) );
     }
 
   }
