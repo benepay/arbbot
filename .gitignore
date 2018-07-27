@@ -3,3 +3,4 @@ config.ini
 config.ini.[0-9]*
 poloniex-tradeHistory.csv
 web/config.inc.php
+conf/

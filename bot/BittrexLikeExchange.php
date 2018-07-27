@@ -424,8 +424,9 @@ abstract class BittrexLikeExchange extends Exchange {
     }
     curl_setopt( $ch, CURLOPT_URL, $uri );
     curl_setopt( $ch, CURLOPT_HTTPHEADER, ["apisign: $sign" ] );
-    curl_setopt( $ch, CURLOPT_CONNECTTIMEOUT, 10 );
+    curl_setopt( $ch, CURLOPT_CONNECTTIMEOUT, 30 );
     curl_setopt( $ch, CURLOPT_TIMEOUT, 180 );
+    // curl_setopt( $ch, CURLOPT_VERBOSE, true);
 
     $error = null;
     for ( $i = 0; $i < 5; $i++ ) {
@@ -433,6 +434,8 @@ abstract class BittrexLikeExchange extends Exchange {
         $data = curl_exec( $ch );
         $code = curl_getinfo( $ch, CURLINFO_HTTP_CODE );
         if ($code != 200) {
+          $error = $this->prefix() . "Could not get reply: " . curl_error( $ch );
+          // throw new Exception( "HTTP ${code} received from server, URI: $uri   DATA: $data" );
           throw new Exception( "HTTP ${code} received from server" );
         }
         //

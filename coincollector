@@ -1,0 +1,267 @@
+#!/usr/bin/env perl
+# I had trouble getting the Perl modules installed in Ubuntu, the easiest way
+#  is to just use apt for some of them.
+# sudo apt -y install libio-socket-ssl-perl libnet-ssleay-perl libssl-dev cpanminus libdbd-mysql-perl libjson-pp-perl
+# cpanm Net::SSLeay LWP::Protocol::https Math::BigFloat JSON Text::Table DBI Config::IniFiles Measure::Everything::Adapter::InfluxDB::Direct File::NFSLock
+# You'll also need the influxdb to exist before writing to it:
+# (replace 'localhost' below for remote influxdb servers)
+# curl -i -XPOST http://localhost:8086/query --data-urlencode "q=CREATE DATABASE coincollector"
+
+use strict;
+use LWP::Simple;
+use LWP::Protocol::https;
+use LWP::ConnCache; 
+use Math::BigFloat;
+use JSON qw( decode_json );
+use Getopt::Long;
+use Data::Dumper;
+use Measure::Everything qw($stats);
+use Measure::Everything::Adapter;
+use Log::Any::Adapter;
+Log::Any::Adapter->set( 'Stderr');
+use Text::Table;
+use DBI;
+use DBD::mysql;
+use Config::IniFiles;
+
+use Fcntl qw(LOCK_EX LOCK_NB);
+use File::NFSLock;
+# Try to get an exclusive lock on myself.
+my $lock = File::NFSLock->new($0, LOCK_EX|LOCK_NB);
+die "$0 is already running!\n" unless $lock;
+
+my $cfg = Config::IniFiles->new( -file => "/var/www/arbbot/config.ini" );
+my $mysql_user = $cfg->val("db", "user");
+my $mysql_pass = $cfg->val("db", "pass");
+my $mysql_db = $cfg->val("db", "name");
+my $mysql_host = $cfg->val("db", "host");
+my $cfg = Config::IniFiles->new( -file => "/var/www/arbbot/coincollector.ini" );
+
+my $dbh = DBI->connect("DBI:mysql:database=$mysql_db;host=$mysql_host",
+    $mysql_user, $mysql_pass, {RaiseError => 1});
+
+Measure::Everything::Adapter->set( 'InfluxDB::Direct',
+    host => $cfg->val("coincollector","influx_host"),
+    port => $cfg->val("coincollector","influx_port"),
+    db   => $cfg->val("coincollector","influx_db"),
+    precision => 'ns'      # default is ns (nanoseconds)
+);
+
+my $pollperiod = $cfg->val("coincollector", "pollperiod");
+
+
+# Get coin balances from arbbot
+print "----------\nChecking Balances\n----------\n" if $cfg->val("coincollector","debug") gt 1;
+my $sql = "SELECT created as time_sec, coin, balance, trades, ID_exchange as exchange FROM current_snapshot WHERE trades > 0 or coin = 'BTC' AND created > UNIX_TIMESTAMP() - $pollperiod ORDER BY balance ASC";
+my $sth = $dbh->prepare("$sql") || die "Error:" . $dbh->errstr . "\n";
+$sth->execute ||  die "Error:" . $sth->errstr . "\n";
+
+my ($total_btc, $total_fiat);
+if ($sth->rows lt 1) {
+    print "No Balance entries found in the $mysql_db.current_snapshot table for the last $pollperiod seconds\nSQL Statement:\n$sql\n" if $cfg->val("coincollector","debug") gt 0;
+} else {
+    printf "Executed SQL statement: %s\n", $sql if $cfg->val("coincollector","debug") gt 1;
+    while (my $row = $sth->fetchrow_hashref) {
+        $row->{exchange} = "Poloniex" if $row->{exchange} eq 1;
+        $row->{exchange} = "Bleutrade" if $row->{exchange} eq 2;
+        $row->{exchange} = "Bittrex" if $row->{exchange} eq 3;
+        my $time = ($row->{time_sec} * 1000000000);
+        printf "Time of event: %s\n", $row->{time_sec} if $cfg->val("coincollector","debug") gt 2;
+        printf "Calculated Influx Nanoseconds Time: %s\n", ($row->{time_sec} * 1000000000) if $cfg->val("coincollector","debug") gt 2;
+        my $coin2fiat = coin2($row->{coin}, $row->{balance}, $cfg->val("coincollector","fiat"));
+        my $coin2btc = coin2($row->{coin}, $row->{balance}, "BTC");
+        $total_btc += $coin2btc;
+        $total_fiat += $coin2fiat;
+        printf "[%s] %s has %s trades on %s with a value of %s ( $coin2fiat %s/$coin2btc BTC)\n", scalar localtime $row->{time_sec}, $row->{coin}, $row->{trades}, $row->{exchange}, $row->{balance}, $cfg->val("coincollector","fiat") if $cfg->val("coincollector","debug") gt 0;
+        if ($cfg->val("coincollector","debug") gt 1) {
+            my $tb = Text::Table->new(
+                "amount_owned", "coin", "coin_price_btc", "exchange", "trade_frequency", "value"
+            );
+            $tb->load(
+                [ $row->{balance}, $row->{coin}, $coin2btc, $row->{exchange}, $row->{trades}, $coin2fiat  ],
+            );
+            printf "[%s] Writing %s value: $coin2fiat %s to InfluxDB\n", $row->{exchange}, $row->{coin}, $cfg->val("coincollector","fiat") if $cfg->val("coincollector","debug") gt 0;
+            print $tb;
+        }
+        if ($cfg->val("coincollector","influx") gt 0 ) {
+            $stats->write(
+                "portfolio_".$cfg->val("coincollector","fiat"), $coin2fiat,
+                {
+                    'Coin'=>$row->{coin},
+                    'Coin Balance'=>$row->{balance},
+                    'BTC Value'=>$coin2btc,
+                    'Exchange'=>$row->{exchange},
+                    'Number of Trades'=>$row->{trades},
+                },
+                $time
+            );
+        }
+    }
+    my $current_btc_market_price = coin2("BTC", 1, $cfg->val("coincollector","fiat"));
+    printf "Current BTC Market Value: %s\n", $current_btc_market_price if $cfg->val("coincollector","debug") gt 0;
+    # insert into influx as a float even if the first entry is an int:
+    $total_fiat = $total_fiat . ".00" if $total_fiat eq 0;
+    $total_btc = $total_btc . ".00000000" if $total_btc eq 0;
+    $stats->write("market_price_BTC_".$cfg->val("coincollector","fiat"), $current_btc_market_price) if ($cfg->val("coincollector","influx") gt 0);
+    # Removed below - using getWalletBTC() now:
+    printf "Portfolio value for the last $pollperiod seconds is %s %s/%s BTC\n", $total_fiat, $cfg->val("coincollector","fiat"), $total_btc if $cfg->val("coincollector","debug") gt 0;
+    #$stats->write("portfolio_value_".$cfg->val("coincollector","fiat"), $total_fiat) if ($cfg->val("coincollector","influx") gt 0);
+    #$stats->write("portfolio_value_BTC", $total_btc) if ($cfg->val("coincollector","influx") gt 0);
+}
+
+# TODO: Querying the Arbbot server using `sub getArbbotWallet()` is dreadfully slow
+# This is a problem with Arbbot, so that needs to be addressed.
+# The function works, but to speed things up, we'll rely on the SQL function above to populate $total_btc
+#my $total_btc = getWalletBTC('total');
+my $totalFiat = coin2('BTC', "$total_btc", $cfg->val("coincollector","fiat"));
+print "Total Portfolio Value (BTC): $total_btc\n" if $cfg->val("coincollector","debug") gt 0;
+printf "Total Portfolio Value (%s): %.2f\n", $cfg->val("coincollector","fiat"), $totalFiat if $cfg->val("coincollector","debug") gt 0;
+if ($cfg->val("coincollector","influx") gt 0 ) {
+    $stats->write( "portfolio_value_".$cfg->val("coincollector","fiat"), $totalFiat);
+    $stats->write( "portfolio_value_BTC", $total_btc);
+}
+
+
+
+## Get arbbot's P&L
+print "----------\nChecking P&L\n----------\n" if $cfg->val("coincollector","debug") gt 1;
+my $sql = "SELECT created, coin, currency, tradeable_sold AS amount, currency_bought, currency_sold, currency_revenue, currency_pl, currency_tx_fee, tradeable_tx_fee, ID_exchange_source AS source, ID_exchange_target AS target FROM profit_loss WHERE created > UNIX_TIMESTAMP() - $pollperiod ORDER BY created ASC";
+$sth = $dbh->prepare("$sql") || die "Error:" . $dbh->errstr . "\n";
+$sth->execute ||  die "Error:" . $sth->errstr . "\n";
+
+if ($sth->rows lt 1) {
+    print "No P&L entries found in the $mysql_db.profit_loss table for the last $pollperiod seconds\n" if $cfg->val("coincollector","debug") gt 0;
+    print "SQL Statement:\n$sql\n" if $cfg->val("coincollector","debug") gt 1;
+} else {
+    printf "Executed SQL statement: %s\n", $sql if $cfg->val("coincollector","debug") gt 1;
+    while (my $row = $sth->fetchrow_hashref) {
+        my $coin2fiat = coin2($row->{currency}, $row->{currency_pl}, $cfg->val("coincollector","fiat"));
+        my $coin2btc = coin2($row->{currency}, $row->{currency_pl}, "BTC");
+        my $time = ($row->{created} * 1000000000);
+        printf "Time of event: %s\n", $row->{created} if $cfg->val("coincollector","debug") gt 2;
+        printf "Calculated Influx Nanoseconds Time: %s\n", ($row->{created} * 1000000000) if $cfg->val("coincollector","debug") gt 2;
+        printf "Time: %s\n", $time if $cfg->val("coincollector","debug") gt 2;
+        printf "Coin %s\n", $row->{coin} if $cfg->val("coincollector","debug") gt 1;
+        printf "Currency %s\n", $row->{coin} if $cfg->val("coincollector","debug") gt 1;
+        printf "Amount %s\n", $row->{amount} if $cfg->val("coincollector","debug") gt 1;
+        printf "Currency Bought %s\n", $row->{currency_bought} if $cfg->val("coincollector","debug") gt 1;
+        printf "Currency Sold %s\n", $row->{currency_sold} if $cfg->val("coincollector","debug") gt 1;
+        printf "Currency Revenue %s\n", $row->{currency_revenue} if $cfg->val("coincollector","debug") gt 1;
+        printf "Currency P&L %s\n", $row->{currency_pl} if $cfg->val("coincollector","debug") gt 1;
+        printf "Currency TX Fee %s\n", $row->{currency_tx_fee} if $cfg->val("coincollector","debug") gt 1;
+        printf "Tradeable TX Fee %s\n", $row->{tradeable_tx_fee} if $cfg->val("coincollector","debug") gt 1;
+        printf "Source Exchange %s\n", $row->{source} if $cfg->val("coincollector","debug") gt 1;
+        printf "Target Exchange %s\n", $row->{target} if $cfg->val("coincollector","debug") gt 1;
+        $row->{source} = "Poloniex" if $row->{source} eq 1;
+        $row->{source} = "Bleutrade" if $row->{source} eq 2;
+        $row->{source} = "Bittrex" if $row->{source} eq 3;
+        $row->{target} = "Poloniex" if $row->{target} eq 1;
+        $row->{target} = "Bleutrade" if $row->{target} eq 2;
+        $row->{target} = "Bittrex" if $row->{target} eq 3;
+        $stats->write(
+            "profit_loss", $coin2fiat,
+            {
+                coin=>$row->{coin},
+                currency=>$row->{currency},
+                amount=>$row->{amount},
+                currency_bought=>$row->{currency_bought},
+                currency_sold=>$row->{currency_sold},
+                currency_revenue=>$row->{currency_revenue},
+                currency_pl=>$row->{currency_pl},
+                currency_tx_fee=>$row->{currency_tx_fee},
+                tradeable_tx_fee=>$row->{tradeable_tx_fee},
+                source=>$row->{source},
+                target=>$row->{target}
+            },
+            $time
+        );
+        printf "[%s] P&L transaction for %s: $coin2fiat (%s) $coin2btc (BTC)\n", scalar localtime $row->{created}, $row->{coin}, $cfg->val("coincollector","fiat") if $cfg->val("coincollector","debug") gt 0;
+    }
+}
+$sth->finish;
+$dbh->disconnect;
+
+sub coin2 {
+    my $coin = shift;
+    my $amount = shift;
+    my $to = shift;
+    my $url = "https://min-api.cryptocompare.com/data/price?fsym=$coin&tsyms=$to&tryConversion=true";
+    print "Querying $url\n" if $cfg->val("coincollector","debug") gt 2;
+    my $json = get($url);
+    print "JSON Response: $json\n" if $cfg->val("coincollector","debug") gt 2;
+    my $from_json = decode_json($json);
+    print "Dump:\n " . Dumper($from_json) if $cfg->val("coincollector","debug") gt 2;
+    printf "from JSON 'to' variable is: %s\n", $from_json->{'USD'} if $cfg->val("coincollector","debug") gt 2;
+    my $total = $from_json->{$to} * $amount;
+    printf "[sub coin2] Converting $amount $coin to $to\n" if $cfg->val("coincollector","debug") gt 2;
+    $total = sprintf ("%.8f", $total);
+    return $total;
+}
+sub getArbbotWallet {
+    my $url = $cfg->val("coincollector","arbbot_url") . "/ajax.php?func=wallets";
+
+    my $browser = LWP::UserAgent->new( 
+        conn_cache=>LWP::ConnCache->new(),
+        timeout=>600,
+        ssl_opts => { 
+            verify_hostname => 0, 
+            SSL_verify_mode => IO::Socket::SSL::SSL_VERIFY_NONE 
+        }
+    );
+    print "Querying Arbbot Wallet URL: $url\n" if $cfg->val("coincollector","debug") gt 2;
+    my $response = $browser->get( $url );
+    if ($response->is_success) {
+        printf "[sub getArbbotWallet] JSON Response: %s\n", $response->content if $cfg->val("coincollector","debug") gt 6;
+        return $response->content;
+    }
+    else {
+        die $response->status_line;
+    }
+}
+
+
+# GetWalletItem
+# parameters:
+# item name, e.g.: balance_BTC
+# coin name, e.g.: DOGE
+# exchange, e.g: 1 (for Poloniex, 2 for Bleutrade, 3 for Bittrex in my case)
+# coin and exchange are optional. If omitted, all will be returned
+# Current Item options are:
+#  balance
+#  balance_diff
+#  opportunities
+#  change
+#  trades
+#  balance_BTC
+#  sample usage:
+#  getWalletItem('balance_BTC','DOGE',1)
+#
+#  TODO: params are not implemented yet
+#   for now, it just returns BTC value for all coins
+sub getWalletBTC {
+    my $totalOnly = shift;
+    my ($item, $coinName, $exch) = @_;
+    my $json = getArbbotWallet();
+    my $decoded = decode_json($json);
+    my $btcTotal = 0;
+    #print Dumper($decoded);
+    my $wallets = $decoded->{'wallets'};
+    my ($exch_name);
+    while (my ($coin, $coins) = each %$wallets) {
+        while (my ($exch_id, $hash) = each %$coins) {
+            $exch_name = "Poloniex" if $exch_id eq 1;
+            $exch_name = "Bleutrade" if $exch_id eq 2;
+            $exch_name = "Bittrex" if $exch_id eq 3;
+            $btcTotal += sprintf ("%.8f", $decoded->{'wallets'}{"$coin"}{"$exch_id"}{'balance_BTC'});
+            if (not defined $totalOnly) {
+                if ($cfg->val("coincollector","debug") gt 1) {
+                    print "[$coin]->[$exch_name] BTC Balance = " 
+                    . sprintf ("%.8f", $decoded->{'wallets'}{"$coin"}{"$exch_id"}{'balance_BTC'}) 
+                    . "\n" if ($decoded->{'wallets'}{"$coin"}{"$exch_id"}{'balance_BTC'} gt 0);
+                }
+            }
+        }
+        print "BTC Total = $btcTotal\n" if $cfg->val("coincollector","debug") gt 1;
+    }
+    return $btcTotal;
+}
